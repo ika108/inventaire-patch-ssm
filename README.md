@@ -1,0 +1,1 @@
+# inventaire-patch-ssm
