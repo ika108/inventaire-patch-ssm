@@ -5,29 +5,7 @@ import sys
 import pprint
 import re
 
-LINUX_DOCUMENT = "AWS-RunShellScript"
-WINDOWS_DOCUMENT = "AWS-RunPowerShellScript"
-
-LINUX_GET_OS_CMD = ["cat /etc/os-release 2>/dev/null"]
-
-WINDOWS_GET_OS_CMD = ["$os = (Get-WmiObject -Class Win32_OperatingSystem).Caption",
-        "$os_version = (Get-WmiObject -Class Win32_OperatingSystem).Version",
-        "$boottime = (systeminfo | Select-String \"System Boot Time\")",
-        "Write-Output \"NAME=$os\"",
-        "Write-Output \"VERSION_ID=$os_version\"",
-        "Write-Output \"launch_time=$boottime\""] 
-
-WINDOWS_GET_PENDING_UPDATES = ["$UpdateSession = New-Object -ComObject Microsoft.Update.Session",
-        "$UpdateSearcher = $UpdateSession.CreateupdateSearcher()",
-        "@($UpdateSearcher.Search(\"IsHidden=0 and IsInstalled=0\").Updates)"]
-
-LINUX_GET_UPTIME_CMD = ["uptime -s 2>/dev/null"]
-
-YUM_GET_PENDING_PKG_CMD = ["yum --cacheonly check-update -q | grep -v '^\(Loaded plugins\|security\|Obsoleting\|Last metadata expiration check\)' | wc -l"]
-
-DNF_GET_PENDING_PKG_CMD = ["dnf --cacheonly check-update -q | grep -v '^\(Last metadata expiration check\|Dependencies resolved\)' | wc -l"]
-
-APT_GET_PENDING_PKG_CMD = ["apt list --upgradable | grep -v -e \"^Listing...\" | wc -l"]
+# Implement document injection through terraform
 
 instances_state = {}
 
@@ -54,27 +32,25 @@ def convert_unix_to_epoch(date_str):
     return int(datetime_obj.timestamp())
 
 
-def send_command(instance_id, commands, delay=20):
-    # Create a boto3 client for the SSM service
+def run_document(instance_id, document_name, delay=10):
     ssm_client = boto3.client('ssm')
 
-    document_name = ""
-    if instances_state[instance_id]['os_type'] == 'Windows':
-        document_name = WINDOWS_DOCUMENT
-    else:
-        document_name = LINUX_DOCUMENT
-    
-    print(f"Exécution sur l'instance {instance_id} ({commands})")
+    print(f"Exécution sur l'instance {instance_id} ({document_name})")
 
     try:
+        # Sending the command to the specified instances
         response = ssm_client.send_command(
-            DocumentName=document_name,
-            Parameters={'commands': commands},
-            InstanceIds=[instance_id]
+            DocumentName=document_name,    # Name of the SSM document
+            InstanceIds=[instance_id],      # List of instance IDs
+            Parameters={                  # Parameters required by the document, if any
+                'commands': ['']  # Assuming the document takes a 'commands' parameter, adjust if needed
+            },
+            Comment='Example command execution'  # Optional comment about the command
         )
+        
+        # Output the command ID and status
         command_id = response['Command']['CommandId']
-
-        print(f"Commande envoyée, ID est {command_id}. En attente de sortie...")
+        print(f"Commande executée, ID est {command_id}. En attente de sortie...")
         time.sleep(delay)  # Attendre que la commande s'exécute
 
         output = ssm_client.get_command_invocation(
@@ -147,27 +123,32 @@ def get_os_info(instance_id):
 
 
 def __get_linux_os_info__(instance_id):  
-    os_info = send_command(instance_id, LINUX_GET_OS_CMD)
-    launchtime = send_command(instance_id, LINUX_GET_UPTIME_CMD)
+    os_info = run_document(instance_id, "LinuxGetOsCmd")
+    launchtime = run_document(instance_id, "LinuxGetUptimeCmd")
+    # os_info = send_command(instance_id, LINUX_GET_OS_CMD)
+    # launchtime = send_command(instance_id, LINUX_GET_UPTIME_CMD)
     # Parse /etc/os-release
     parsed_os_info = {}
     lines = (os_info.split("\n"))
     for line in lines: 
         if line:
             keyvalue = line.split("=")
-            parsed_os_info[keyvalue[0]] = keyvalue[1].strip('\"')
+            if len(keyvalue) == 2: parsed_os_info[keyvalue[0]] = keyvalue[1].strip('\"')
+            else: parsed_os_info[keyvalue[0]] = ""
     parsed_os_info['launch_time'] = convert_unix_to_epoch(launchtime)     
     return parsed_os_info
 
 
 def __get_windows_os_info__(instance_id):
-    os_info = send_command(instance_id, WINDOWS_GET_OS_CMD)
+    os_info = run_document(instance_id, "WindowsGetOsCmd")
+    # os_info = send_command(instance_id, WINDOWS_GET_OS_CMD)
     parsed_os_info = {}
     lines = (os_info.split("\n"))
     for line in lines: 
         if line:
             keyvalue = line.split("=")
-            parsed_os_info[keyvalue[0]] = keyvalue[1].strip('\"')
+            if len(keyvalue) == 2: parsed_os_info[keyvalue[0]] = keyvalue[1].strip('\"')
+            else: parsed_os_info[keyvalue[0]] = ""
     win_time = convert_windows_to_epoch(parsed_os_info['launch_time'])
     parsed_os_info['launch_time'] = win_time
     return parsed_os_info
@@ -227,34 +208,37 @@ def get_pending_system_updates(instance_id):
         return __get_pending_linux_system_updates__(instance_id)
 
 
-
 def __get_pending_windows_system_updates__(instance_id):
-    updates = send_command(instance_id, WINDOWS_GET_PENDING_UPDATES)
+    updates = run_document(instance_id, "WindowsGetPendingUpdatesCmd")
+    # updates = send_command(instance_id, WINDOWS_GET_PENDING_UPDATES)
     parsed_updates = {}
     lines = (updates.split("\n"))
     for line in lines: 
         if line:
             keyvalue = line.split(":")
             keyvalue[0] = keyvalue[0].strip()
-            if keyvalue[1]: keyvalue[1] = keyvalue[1].strip()
-            if keyvalue[1]: parsed_updates[keyvalue[0]] = keyvalue[1].strip('\"')
+            if len(keyvalue) == 2: keyvalue[1] = keyvalue[1].strip()
+            if len(keyvalue) == 2: parsed_updates[keyvalue[0]] = keyvalue[1].strip('\"')
     return parsed_updates
 
 def __get_pending_linux_system_updates__(instance_id):
-    if "CentOS Linux 7" in instance_id['os_info']['NAME']:
-        command = YUM_GET_PENDING_PKG_CMD    
-    elif "CentOS Linux 8" in instance_id['os_info']['NAME']:
-        command = DNF_GET_PENDING_PKG_CMD
-    elif "Ubuntu" in instance_id['os_info']['NAME']:
-        command = APT_GET_PENDING_PKG_CMD
-    elif "Debian" in instance_id['os_info']['NAME']:
-        command = APT_GET_PENDING_PKG_CMD
+    pprint.pp(instance_id)
+    if "CentOS Linux 7" in instances_state[instance_id]['os_info']['NAME']:
+        command_name = "YumGetPendingPkgCmd"    
+    elif "CentOS Linux 8" in instances_state[instance_id]['os_info']['NAME']:
+        command_name = "DnfGetPendingPkgCmd"
+    elif "Ubuntu" in instances_state[instance_id]['os_info']['NAME']:
+        command_name = "AptGetPendingPkgCmd"
+    elif "Debian" in instances_state[instance_id]['os_info']['NAME']:
+        command_name = "AptGetPendingPkgCmd"
     else:
-        print("Can't recognize distribution : $os", instance_id['os_info']['NAME'])
+        print("Can't recognize distribution : {instances_state[instance_id]['os_info']['NAME']}", )
         return []
-    updates = send_command(instance_id, command)
+    # updates = send_command(instance_id, command)
+    updates = run_document(instance_id, command_name)
     print(f"Debug pending updates : |{updates}|")
     return updates
+    
     
 def get_instance_ami_age(instance_id):
     ec2 = boto3.client('ec2')
@@ -291,6 +275,7 @@ def main(instance_ids):
         # instances_state[instance_id]['last_fetch'] = time.asctime()
     print("Debug : ")
     pprint.pp(instances_state)
+
 
 if __name__ == "__main__":
     # Exemple d'utilisation: python3 script.py [i-1234567890abcdef0] [i-abcdef1234567890]
