@@ -4,10 +4,16 @@ import datetime
 import sys
 import pprint
 import re
+import json
 
-# Implement document injection through terraform
+
+
+## Patch Managment Acceptancy critera : KPI (%) = 100 - ((nb_instance_with_old_pending_patches / nb_instances) * 100 )
+## old_pending_patches = pending more than 30 Days
 
 instances_state = {}
+
+debug = False
 
 # ThereMIGHT be a slight TZ issue with this. Windows systeminfo command doesn't provide any TZ information
 def convert_windows_to_epoch(date_str):
@@ -45,12 +51,12 @@ def run_document(instance_id, document_name, delay=10):
             Parameters={                  # Parameters required by the document, if any
                 'commands': ['']  # Assuming the document takes a 'commands' parameter, adjust if needed
             },
-            Comment='Example command execution'  # Optional comment about the command
+            Comment=document_name  # Optional comment about the command
         )
         
         # Output the command ID and status
         command_id = response['Command']['CommandId']
-        print(f"Commande executée, ID est {command_id}. En attente de sortie...")
+        print(f"Commande {document_name} executée, ID est {command_id}. En attente de sortie...")
         time.sleep(delay)  # Attendre que la commande s'exécute
 
         output = ssm_client.get_command_invocation(
@@ -58,12 +64,14 @@ def run_document(instance_id, document_name, delay=10):
             InstanceId=instance_id
         )
         if output['Status'] == 'Success':
+            if debug: print(f"Resultat : |{output['StandardOutputContent']}|")
             return output['StandardOutputContent']
         else:
-            print(f"Erreur ou absence de sortie de l'exécution de la commande sur l'instance {instance_id}")
+            if debug: print(f"OUTPUT: |{pprint.pp(output)}|")
+            print(f"Erreur ou absence de sortie de l'exécution de la commande {document_name} sur l'instance {instance_id}")
             return None
     except Exception as e:
-        print(f"Échec de l'envoi de la commande à l'instance {instance_id} ou l'instance est hors ligne. Erreur: {str(e)}")  
+        print(f"Échec de l'envoi de la commande {document_name} à l'instance {instance_id} ou l'instance est hors ligne. Erreur: {str(e)}")  
 
 
 def fetch_instance_ids():
@@ -140,7 +148,7 @@ def __get_linux_os_info__(instance_id):
 
 
 def __get_windows_os_info__(instance_id):
-    os_info = run_document(instance_id, "WindowsGetOsCmd")
+    os_info = run_document(instance_id, "WindowsGetOsCmd", 20)
     # os_info = send_command(instance_id, WINDOWS_GET_OS_CMD)
     parsed_os_info = {}
     lines = (os_info.split("\n"))
@@ -180,8 +188,10 @@ def get_reboot_pending_ssm_patches(instance_id):
 def get_installed_ssm_patches(instance_id):
     ssm_client = boto3.client('ssm')
     try:
-        response = ssm_client.Z(InstanceIds=[instance_id])
-        return response['InstancePatchStates']
+        response = ssm_client.describe_instance_patches(InstanceId=instance_id, Filters=[
+            {'Key': 'State', 'Values':['Installed','InstalledOther']}
+        ])
+        return response.get('Patches', [])
     except Exception as e:
         print(f"Error retrieving applied patches: {e}")
 
@@ -201,24 +211,66 @@ def get_older_pending_patch_age(instance_id):
 
 
 def get_pending_system_updates(instance_id):
-    updates = []
     if instances_state[instance_id]['os_type'] == 'Windows':
         return __get_pending_windows_system_updates__(instance_id)
     else:
         return __get_pending_linux_system_updates__(instance_id)
+    
+    
+def get_installed_system_updates(instance_id):
+    if instances_state[instance_id]['os_type'] == 'Windows':
+        return __get_installed_windows_system_updates__(instance_id)
+    else:
+        return __get_installed_linux_system_updates__(instance_id)
 
 
 def __get_pending_windows_system_updates__(instance_id):
-    updates = run_document(instance_id, "WindowsGetPendingUpdatesCmd")
-    # updates = send_command(instance_id, WINDOWS_GET_PENDING_UPDATES)
-    parsed_updates = {}
-    lines = (updates.split("\n"))
+    updates_raw = run_document(instance_id, "WindowsGetPendingUpdatesCmd", 30)
+    parsed_updates = []
+    last_update = {}
+    lines = (updates_raw.split("\n"))
     for line in lines: 
         if line:
             keyvalue = line.split(":")
-            keyvalue[0] = keyvalue[0].strip()
-            if len(keyvalue) == 2: keyvalue[1] = keyvalue[1].strip()
-            if len(keyvalue) == 2: parsed_updates[keyvalue[0]] = keyvalue[1].strip('\"')
+            if len(keyvalue) == 2:
+                keyvalue[0] = keyvalue[0].strip()
+                keyvalue[1] = keyvalue[1].strip()
+                if debug: print(f"upd : |{keyvalue[0]}| => |{keyvalue[1]}|")
+                if keyvalue[0] == "Title":
+                    parsed_updates.append(last_update) 
+                    last_update = {}
+                    last_update['Title'] = keyvalue[1]
+                # if len(keyvalue) == 2: keyvalue[1] = keyvalue[1].strip('\"')
+                else: 
+                    last_update[keyvalue[0]] = keyvalue[1]
+                    # if last_update['Title']: parsed_updates[-1].append({keyvalue[0]: keyvalue[1]})
+                        #parsed_updates.append({last_update_title: {keyvalue[0]: keyvalue[1]}})
+    if len(last_update) > 1: parsed_updates.append(last_update) 
+    return parsed_updates
+
+
+def __get_installed_windows_system_updates__(instance_id):
+    updates_raw = run_document(instance_id, "WindowsGetInstalledUpdatesCmd", 30)
+    parsed_updates = []
+    last_update = {}
+    lines = (updates_raw.split("\n"))
+    for line in lines: 
+        if line:
+            keyvalue = line.split(":")
+            if len(keyvalue) == 2:
+                keyvalue[0] = keyvalue[0].strip()
+                keyvalue[1] = keyvalue[1].strip()
+                if debug: print(f"upd : |{keyvalue[0]}| => |{keyvalue[1]}|")
+                if keyvalue[0] == "Title":
+                    parsed_updates.append(last_update) 
+                    last_update = {}
+                    last_update['Title'] = keyvalue[1]
+                # if len(keyvalue) == 2: keyvalue[1] = keyvalue[1].strip('\"')
+                else: 
+                    last_update[keyvalue[0]] = keyvalue[1]
+                    # if last_update['Title']: parsed_updates[-1].append({keyvalue[0]: keyvalue[1]})
+                        #parsed_updates.append({last_update_title: {keyvalue[0]: keyvalue[1]}})
+    if len(last_update) > 1: parsed_updates.append(last_update) 
     return parsed_updates
 
 def __get_pending_linux_system_updates__(instance_id):
@@ -238,9 +290,12 @@ def __get_pending_linux_system_updates__(instance_id):
     updates = run_document(instance_id, command_name)
     print(f"Debug pending updates : |{updates}|")
     return updates
+
+def __get_installed_linux_system_updates__(instance_id):
+    return []
     
     
-def get_instance_ami_age(instance_id):
+def get_instance_ami(instance_id):
     ec2 = boto3.client('ec2')
     
     try:
@@ -268,13 +323,19 @@ def main(instance_ids):
         print(f"Fetching instance {instance_id}")
         instances_state[instance_id]['os_info'] = get_os_info(instance_id)
         instances_state[instance_id]['instance_tags'] = get_instance_tags(instance_id)
-        instances_state[instance_id]['pending_updates'] = get_pending_system_updates(instance_id)
-        # instances_state[instance_id]['pending_patches'] = get_pending_ssm_patches(instance_id), get_reboot_pending_ssm_patches(instance_id)
-        # instances_state[instance_id]['installed_patches'] = get_installed_ssm_patches(instance_id)
-        # instances_state[instance_id]['running_ami'] = get_running_ami(instance_id)
-        # instances_state[instance_id]['last_fetch'] = time.asctime()
-    print("Debug : ")
-    pprint.pp(instances_state)
+        # instances_state[instance_id]['pending_updates'] = get_pending_system_updates(instance_id)
+        # instances_state[instance_id]['installed_updates'] = get_installed_system_updates(instance_id)
+        instances_state[instance_id]['pending_patches'] = get_pending_ssm_patches(instance_id)
+        instances_state[instance_id]['reboot_pending_patches'] = get_reboot_pending_ssm_patches(instance_id)
+        instances_state[instance_id]['installed_patches'] = get_installed_ssm_patches(instance_id)
+        instances_state[instance_id]['running_ami'] = get_instance_ami(instance_id)
+        instances_state[instance_id]['last_fetch'] = time.asctime()
+    if debug: 
+        print("Debug : ")
+        pprint.pp(instances_state)
+    else:
+        parsed_data = json.dumps(instances_state, sort_keys=True, default=str)
+        print(parsed_data)
 
 
 if __name__ == "__main__":

@@ -11,7 +11,10 @@ locals {
          "Write-Output \"launch_time=$boottime\""]
   windows_get_pending_updates_cmd = ["$UpdateSession = New-Object -ComObject Microsoft.Update.Session",
          "$UpdateSearcher = $UpdateSession.CreateupdateSearcher()",
-         "@($UpdateSearcher.Search(\"IsHidden=0 and IsInstalled=0\").Updates)"]
+         "@($UpdateSearcher.Search(\"IsHidden=0 and IsInstalled=0\").Updates)| Out-String -Width 4096"]
+  windows_get_installed_updates_cmd = ["$UpdateSession = New-Object -ComObject Microsoft.Update.Session",
+         "$UpdateSearcher = $UpdateSession.CreateupdateSearcher()",
+         "@($UpdateSearcher.Search(\"IsHidden=0 and IsInstalled=1\").Updates)| Out-String -Width 4096"]
   linux_get_uptime_cmd = "uptime -s 2>/dev/null"
   yum_get_pending_pkg_cmd = "yum --cacheonly check-update -q | grep -v \"^(Loaded plugins|security|Obsoleting|Last metadata expiration check)\" | wc -l"
   dnf_get_pending_pkg_cmd = "dnf --cacheonly check-update -q | grep -v \"^(Last metadata expiration check|Dependencies resolved)\" | wc -l"
@@ -98,6 +101,35 @@ mainSteps:
         - '${local.windows_get_pending_updates_cmd[0]}'
         - '${local.windows_get_pending_updates_cmd[1]}'
         - '${local.windows_get_pending_updates_cmd[2]}'
+DOC
+
+  tags = {
+    Owner = "PLAT"
+    RefreshDate = timestamp()
+  }
+}
+
+resource "aws_ssm_document" "windows_get_installed_updates" {
+  name            = "WindowsGetInstalledUpdatesCmd"
+  document_type   = "Command"
+  document_format = "YAML"
+
+  content = <<DOC
+schemaVersion: '2.2'
+description: 'Run a PowerShell script on Windows instances'
+parameters:
+  commands:
+    type: String
+    description: 'Extract installed updates from an Update.Session object.'
+    default: ''
+mainSteps:
+  - action: 'aws:runPowerShellScript'
+    name: 'runPowerShellScript'
+    inputs:
+      runCommand:
+        - '${local.windows_get_installed_updates_cmd[0]}'
+        - '${local.windows_get_installed_updates_cmd[1]}'
+        - '${local.windows_get_installed_updates_cmd[2]}'
 DOC
 
   tags = {
@@ -205,7 +237,7 @@ mainSteps:
     name: 'runShellScript'
     inputs:
       runCommand:
-        - '${local.dnf_get_pending_pkg_cmd}'
+        - '${local.apt_get_pending_pkg_cmd}'
 DOC
 
   tags = {
