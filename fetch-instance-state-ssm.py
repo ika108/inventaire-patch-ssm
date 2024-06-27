@@ -1,12 +1,12 @@
 import boto3
 import time
-import datetime
+from datetime import datetime
 import sys
 import pprint
 import re
 import json
-
-
+from termcolor import colored
+from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_result, before_sleep_log
 
 ## Patch Managment Acceptancy critera : KPI (%) = 100 - ((nb_instance_with_old_pending_patches / nb_instances) * 100 )
 ## old_pending_patches = pending more than 30 Days
@@ -19,11 +19,11 @@ debug = False
 def convert_windows_to_epoch(date_str):
     stripped_date_str = re.search(r'\d+/\d+/\d+, \d+:\d+:\d+ (AM|PM)',date_str)
     # Define the expected date format from systeminfo output
-    date_format = "%m/%d/%Y, %I:%M:%S %p"  # Adjust the format if necessary
 
+    date_format = "%m/%d/%Y, %I:%M:%S %p"  # Adjust the format if necessary
     # Convert the date string to a datetime object
     try:
-        datetime_obj = datetime.datetime.strptime(stripped_date_str.group(), date_format)
+        datetime_obj = datetime.strptime(stripped_date_str.group(), date_format)
         # Convert datetime object to Unix epoch time
         epoch_time = int(datetime_obj.timestamp())
         return epoch_time
@@ -34,44 +34,70 @@ def convert_windows_to_epoch(date_str):
 
 def convert_unix_to_epoch(date_str):
     date_format = "%Y-%m-%d %H:%M:%S"
-    datetime_obj = datetime.datetime.strptime(date_str.strip('\n'), date_format)
+    datetime_obj = datetime.strptime(date_str.strip('\n'), date_format)
     return int(datetime_obj.timestamp())
 
 
-def run_document(instance_id, document_name, delay=10):
+def send_command(instance_id, document_name):
+    """
+    Sends a command to an AWS instance without retries.
+    """
     ssm_client = boto3.client('ssm')
+    response = ssm_client.send_command(
+        DocumentName=document_name,
+        InstanceIds=[instance_id],
+        Parameters={'commands': ['']},
+        Comment=document_name
+    )
+    command_id = response['Command']['CommandId']
+    print(f"Commande {document_name} executée, ID est {command_id}.")
+    return command_id
 
+# Helper function to define what we consider a retry condition
+def is_empty_or_failed_result(result):
+    return result is None or result == '' or 'failed' in result.lower()
+
+
+def before_retry(retry_state):
+    """Function to execute before each retry, logs the attempt number and reason."""
+    print(f"Retrying fetching results... Attempt {retry_state.attempt_number}")
+
+
+@retry(retry=retry_if_result(is_empty_or_failed_result), stop=stop_after_attempt(3), wait=wait_fixed(10), before_sleep=before_retry)
+def fetch_command_result(command_id, instance_id):
+    """
+    Fetches the result of a command execution with retries for empty or failed results.
+    """
+    ssm_client = boto3.client('ssm')
+    output = ssm_client.get_command_invocation(
+        CommandId=command_id,
+        InstanceId=instance_id
+    )
+    if output['Status'] == 'Success' and output['StandardOutputContent']:
+        return output['StandardOutputContent']
+    else:
+        return ''  # Returning an empty string if not successful or if the output is empty
+
+
+def run_document(instance_id, document_name, delay=10):
+    """
+    Wrapper function to handle command execution and process the output with separate retry logic for fetching results.
+    """
     print(f"Exécution sur l'instance {instance_id} ({document_name})")
 
     try:
-        # Sending the command to the specified instances
-        response = ssm_client.send_command(
-            DocumentName=document_name,    # Name of the SSM document
-            InstanceIds=[instance_id],      # List of instance IDs
-            Parameters={                  # Parameters required by the document, if any
-                'commands': ['']  # Assuming the document takes a 'commands' parameter, adjust if needed
-            },
-            Comment=document_name  # Optional comment about the command
-        )
-        
-        # Output the command ID and status
-        command_id = response['Command']['CommandId']
-        print(f"Commande {document_name} executée, ID est {command_id}. En attente de sortie...")
-        time.sleep(delay)  # Attendre que la commande s'exécute
-
-        output = ssm_client.get_command_invocation(
-            CommandId=command_id,
-            InstanceId=instance_id
-        )
-        if output['Status'] == 'Success':
-            if debug: print(f"Resultat : |{output['StandardOutputContent']}|")
-            return output['StandardOutputContent']
+        command_id = send_command(instance_id, document_name)
+        time.sleep(delay)  # Wait for the command to likely complete execution
+        result = fetch_command_result(command_id, instance_id)
+        if result:
+            if debug:
+                print(f"Resultat : |{result}|")
+            return result
         else:
-            if debug: print(f"OUTPUT: |{pprint.pp(output)}|")
             print(f"Erreur ou absence de sortie de l'exécution de la commande {document_name} sur l'instance {instance_id}")
             return None
     except Exception as e:
-        print(f"Échec de l'envoi de la commande {document_name} à l'instance {instance_id} ou l'instance est hors ligne. Erreur: {str(e)}")  
+        print(f"Une erreur inattendue est survenue lors de la tentative d'exécution de la commande: {str(e)}")
 
 
 def fetch_instance_ids():
@@ -166,7 +192,7 @@ def get_pending_ssm_patches(instance_id):
     ssm_client = boto3.client('ssm')
     try:
         response = ssm_client.describe_instance_patches(InstanceId=instance_id, Filters=[
-            {'Key': 'State', 'Values': ['Missing']}
+            {'Key': 'State', 'Values': ['Missing', 'Failed','InstalledRejected']}
         ])
         return response.get('Patches', [])
     except Exception as e:
@@ -196,18 +222,20 @@ def get_installed_ssm_patches(instance_id):
         print(f"Error retrieving applied patches: {e}")
 
 
-def get_older_pending_patch_age(instance_id):
+def get_older_pending_ssm_patch_age(instance_id):
     oldest_patch = None
     oldest_date = datetime.now()
-    for patch in instances_state[instance_id]['pending_patches']:
-        release_date = datetime.strptime(patch['ReleaseDate'], '%Y-%m-%dT%H:%M:%SZ')
-        if oldest_patch is None or release_date < oldest_date:
-            oldest_patch = patch
-            oldest_date = release_date
-    if oldest_patch:
-        return datetime.now() - release_date
-    else:
-        return None
+    for patch in instances_state[instance_id]['pending_patches'], instances_state[instance_id]['reboot_pending_patches']:
+        if len(patch) > 0:
+            pprint.pp(patch)
+            release_date = datetime.strptime(patch['ReleaseDate'], '%Y-%m-%dT%H:%M:%SZ')
+            if oldest_patch is None or release_date < oldest_date:
+                oldest_patch = patch
+                oldest_date = release_date
+        if oldest_patch:
+            return datetime.now() - release_date
+        else:
+            return None
 
 
 def get_pending_system_updates(instance_id):
@@ -225,54 +253,60 @@ def get_installed_system_updates(instance_id):
 
 
 def __get_pending_windows_system_updates__(instance_id):
-    updates_raw = run_document(instance_id, "WindowsGetPendingUpdatesCmd", 30)
-    parsed_updates = []
-    last_update = {}
+    updates_raw = run_document(instance_id, "WindowsGetPendingUpdatesCmd", 5)
     lines = (updates_raw.split("\n"))
-    for line in lines: 
+    current_update = {'Title': "TBD"}
+    parsed_updates = []
+    for line in lines:
         if line:
             keyvalue = line.split(":")
             if len(keyvalue) == 2:
                 keyvalue[0] = keyvalue[0].strip()
                 keyvalue[1] = keyvalue[1].strip()
-                if debug: print(f"upd : |{keyvalue[0]}| => |{keyvalue[1]}|")
+                print(f"found |{keyvalue[0]}| => |{keyvalue[1]}|")
                 if keyvalue[0] == "Title":
-                    parsed_updates.append(last_update) 
-                    last_update = {}
-                    last_update['Title'] = keyvalue[1]
-                # if len(keyvalue) == 2: keyvalue[1] = keyvalue[1].strip('\"')
-                else: 
-                    last_update[keyvalue[0]] = keyvalue[1]
-                    # if last_update['Title']: parsed_updates[-1].append({keyvalue[0]: keyvalue[1]})
-                        #parsed_updates.append({last_update_title: {keyvalue[0]: keyvalue[1]}})
-    if len(last_update) > 1: parsed_updates.append(last_update) 
+                    print(colored(f"****************************************** found a pending update : |{keyvalue[1]}| ****************************************** ", 'red'))
+                    if keyvalue[1] != current_update['Title']:
+                        print(f"This is a new title : |{keyvalue[1]}| != |{current_update['Title']}|")
+                        if current_update['Title'] != "TBD": parsed_updates.append(current_update)
+                        current_update = {'Title': keyvalue[1]}
+                    else:
+                        print(f"Still pushing for title |{current_update['Title']}| : |{keyvalue[0]}| => |{keyvalue[1]}|")
+                        current_update[keyvalue[0]] = keyvalue[1]
+                else:
+                    current_update[keyvalue[0]] = keyvalue[1]
+    parsed_updates.append(current_update)
     return parsed_updates
+
 
 
 def __get_installed_windows_system_updates__(instance_id):
-    updates_raw = run_document(instance_id, "WindowsGetInstalledUpdatesCmd", 30)
-    parsed_updates = []
-    last_update = {}
+    updates_raw = run_document(instance_id, "WindowsGetInstalledUpdatesCmd", 5)
     lines = (updates_raw.split("\n"))
-    for line in lines: 
+    current_update = {'Title': "TBD"}
+    parsed_updates = []
+    for line in lines:
         if line:
             keyvalue = line.split(":")
             if len(keyvalue) == 2:
                 keyvalue[0] = keyvalue[0].strip()
                 keyvalue[1] = keyvalue[1].strip()
-                if debug: print(f"upd : |{keyvalue[0]}| => |{keyvalue[1]}|")
+                # print(f"found |{keyvalue[0]}| => |{keyvalue[1]}|")
                 if keyvalue[0] == "Title":
-                    parsed_updates.append(last_update) 
-                    last_update = {}
-                    last_update['Title'] = keyvalue[1]
-                # if len(keyvalue) == 2: keyvalue[1] = keyvalue[1].strip('\"')
-                else: 
-                    last_update[keyvalue[0]] = keyvalue[1]
-                    # if last_update['Title']: parsed_updates[-1].append({keyvalue[0]: keyvalue[1]})
-                        #parsed_updates.append({last_update_title: {keyvalue[0]: keyvalue[1]}})
-    if len(last_update) > 1: parsed_updates.append(last_update) 
+                    print(colored(f"****************************************** found an installed update : |{keyvalue[1]}| ****************************************** ", 'red'))
+                    if keyvalue[1] != current_update['Title']:
+                        # print(f"This is a new title : |{keyvalue[1]}| != |{current_update['Title']}|")
+                        if current_update['Title'] != "TBD": parsed_updates.append(current_update)
+                        current_update = {'Title': keyvalue[1]}
+                    else:
+                        # print(f"Still pushing for title |{current_update['Title']}| : |{keyvalue[0]}| => |{keyvalue[1]}|")
+                        current_update[keyvalue[0]] = keyvalue[1]
+                else:
+                    current_update[keyvalue[0]] = keyvalue[1]
+    parsed_updates.append(current_update)
     return parsed_updates
-
+    
+    
 def __get_pending_linux_system_updates__(instance_id):
     pprint.pp(instance_id)
     if "CentOS Linux 7" in instances_state[instance_id]['os_info']['NAME']:
@@ -284,7 +318,7 @@ def __get_pending_linux_system_updates__(instance_id):
     elif "Debian" in instances_state[instance_id]['os_info']['NAME']:
         command_name = "AptGetPendingPkgCmd"
     else:
-        print("Can't recognize distribution : {instances_state[instance_id]['os_info']['NAME']}", )
+        print(f"Can't recognize distribution : {instances_state[instance_id]['os_info']['NAME']}", )
         return []
     # updates = send_command(instance_id, command)
     updates = run_document(instance_id, command_name)
@@ -320,15 +354,16 @@ def get_instance_ami(instance_id):
 
 def main(instance_ids):
     for instance_id in instance_ids:
-        print(f"Fetching instance {instance_id}")
+        print(f"Fetching instance ",colored(instance_id, 'green'))
         instances_state[instance_id]['os_info'] = get_os_info(instance_id)
         instances_state[instance_id]['instance_tags'] = get_instance_tags(instance_id)
-        # instances_state[instance_id]['pending_updates'] = get_pending_system_updates(instance_id)
-        # instances_state[instance_id]['installed_updates'] = get_installed_system_updates(instance_id)
+        instances_state[instance_id]['pending_updates'] = get_pending_system_updates(instance_id)
+        instances_state[instance_id]['installed_updates'] = get_installed_system_updates(instance_id)
         instances_state[instance_id]['pending_patches'] = get_pending_ssm_patches(instance_id)
         instances_state[instance_id]['reboot_pending_patches'] = get_reboot_pending_ssm_patches(instance_id)
         instances_state[instance_id]['installed_patches'] = get_installed_ssm_patches(instance_id)
         instances_state[instance_id]['running_ami'] = get_instance_ami(instance_id)
+        instances_state[instance_id]['oldest_pending_patch'] = get_older_pending_ssm_patch_age(instance_id)
         instances_state[instance_id]['last_fetch'] = time.asctime()
     if debug: 
         print("Debug : ")
