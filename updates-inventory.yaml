@@ -1,0 +1,198 @@
+# aws cloudformation create-stack --stack-name update_inventory_scripts --template-body file://updates-inventory.yaml
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudFormation template for SSM Documents.'
+
+Resources:
+  LinuxGetOsCmd:
+    Type: AWS::SSM::Document
+    Properties:
+      Content:
+        schemaVersion: '2.2'
+        description: 'Run a bash script on Linux instances'
+        parameters:
+          commands:
+            type: String
+            description: 'Extract /etc/os-release content for inventory purpose'
+            default: ''
+        mainSteps:
+          - action: 'aws:runShellScript'
+            name: 'runShellScript'
+            inputs:
+              runCommand:
+                - "cat /etc/os-release 2>/dev/null"
+      DocumentType: Command
+      Name: LinuxGetOsCmd
+      Tags:
+        - Key: Owner
+          Value: PLAT
+
+  WindowsGetOsCmd:
+    Type: AWS::SSM::Document
+    Properties:
+      Content:
+        schemaVersion: '2.2'
+        description: 'Run a PowerShell script on Windows instances'
+        parameters:
+          commands:
+            type: String
+            description: 'Extract relevant data from Win32_OperatingSystem WmiObject.'
+            default: ''
+        mainSteps:
+          - action: 'aws:runPowerShellScript'
+            name: 'runPowerShellScript'
+            inputs:
+              runCommand:
+                - "$os = (Get-WmiObject -Class Win32_OperatingSystem).Caption"
+                - "$os_version = (Get-WmiObject -Class Win32_OperatingSystem).Version"
+                - "$boottime = (systeminfo | Select-String \"System Boot Time\")"
+                - "Write-Output \"NAME=$os\""
+                - "Write-Output \"VERSION_ID=$os_version\""
+                - "Write-Output \"launch_time=$boottime\""
+      DocumentType: Command
+      Name: WindowsGetOsCmd
+      Tags:
+        - Key: Owner
+          Value: PLAT
+
+  WindowsGetPendingUpdatesCmd:
+    Type: AWS::SSM::Document
+    Properties:
+      Content:
+        schemaVersion: '2.2'
+        description: 'Run a PowerShell script on Windows instances'
+        parameters:
+          commands:
+            type: String
+            description: 'Extract pending updates from an Update.Session object.'
+            default: ''
+        mainSteps:
+          - action: 'aws:runPowerShellScript'
+            name: 'runPowerShellScript'
+            inputs:
+              runCommand:
+                - "$UpdateSession = New-Object -ComObject Microsoft.Update.Session"
+                - "$UpdateSearcher = $UpdateSession.CreateupdateSearcher()"
+                - "@($UpdateSearcher.Search(\"IsHidden=0 and IsInstalled=0\").Updates)| Out-String -Width 4096"
+      DocumentType: Command
+      Name: WindowsGetPendingUpdatesCmd
+      Tags:
+        - Key: Owner
+          Value: PLAT
+
+  WindowsGetInstalledUpdatesCmd:
+    Type: AWS::SSM::Document
+    Properties:
+      Content:
+        schemaVersion: '2.2'
+        description: 'Run a PowerShell script on Windows instances'
+        parameters:
+          commands:
+            type: String
+            description: 'Extract installed updates from an Update.Session object.'
+            default: ''
+        mainSteps:
+          - action: 'aws:runPowerShellScript'
+            name: 'runPowerShellScript'
+            inputs:
+              runCommand:
+                - "$UpdateSession = New-Object -ComObject Microsoft.Update.Session"
+                - "$UpdateSearcher = $UpdateSession.CreateupdateSearcher()"
+                - "@($UpdateSearcher.Search(\"IsHidden=0 and IsInstalled=1\").Updates)| Out-String -Width 4096"
+      DocumentType: Command
+      Name: WindowsGetInstalledUpdatesCmd
+      Tags:
+        - Key: Owner
+          Value: PLAT
+
+  LinuxGetUptimeCmd:
+    Type: AWS::SSM::Document
+    Properties:
+      Content:
+        schemaVersion: '2.2'
+        description: 'Run a bash script on Linux instances'
+        parameters:
+          commands:
+            type: String
+            description: 'Fetch instance uptime'
+            default: ''
+        mainSteps:
+          - action: 'aws:runShellScript'
+            name: 'runShellScript'
+            inputs:
+              runCommand:
+                - "uptime -s 2>/dev/null"
+      DocumentType: Command
+      Name: LinuxGetUptimeCmd
+      Tags:
+        - Key: Owner
+          Value: PLAT
+
+  YumGetPendingPkg:
+    Type: AWS::SSM::Document
+    Properties:
+      Content:
+        schemaVersion: '2.2'
+        description: 'Run a bash script on Linux instances'
+        parameters:
+          commands:
+            type: String
+            description: 'Use yum to get a list of upgrade pending packages.'
+            default: ''
+        mainSteps:
+          - action: 'aws:runShellScript'
+            name: 'runShellScript'
+            inputs:
+              runCommand:
+                - "yum --cacheonly check-update -q | grep -v \"^(Loaded plugins|security|Obsoleting|Last metadata expiration check)\""
+      DocumentType: Command
+      Name: YumGetPendingPkg
+      Tags:
+        - Key: Owner
+          Value: PLAT
+
+  DnfGetPendingPkg:
+    Type: AWS::SSM::Document
+    Properties:
+      Content:
+        schemaVersion: '2.2'
+        description: 'Run a bash script on Linux instances'
+        parameters:
+          commands:
+            type: String
+            description: 'Use dnf to get a list of upgrade pending packages.'
+            default: ''
+        mainSteps:
+          - action: 'aws:runShellScript'
+            name: 'runShellScript'
+            inputs:
+              runCommand:
+                - "dnf --cacheonly check-update -q | grep -v \"^(Last metadata expiration check|Dependencies resolved)\""
+      DocumentType: Command
+      Name: DnfGetPendingPkg
+      Tags:
+        - Key: Owner
+          Value: PLAT
+
+  AptGetPendingPkg:
+    Type: AWS::SSM::Document
+    Properties:
+      Content:
+        schemaVersion: '2.2'
+        description: 'Run a bash script on Linux instances'
+        parameters:
+          commands:
+            type: String
+            description: 'Use apt to get a list of upgrade pending packages.'
+            default: ''
+        mainSteps:
+          - action: 'aws:runShellScript'
+            name: 'runShellScript'
+            inputs:
+              runCommand:
+                - "apt list --upgradable | grep -v -e \"^Listing...\" | cut -d \" \" -f 1"
+      DocumentType: Command
+      Name: AptGetPendingPkg
+      Tags:
+        - Key: Owner
+          Value: PLAT

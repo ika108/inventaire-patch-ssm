@@ -12,10 +12,11 @@ from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_result, bef
 
 instances_state = {}
 
-debug = False
+debug = True
 
 # ThereMIGHT be a slight TZ issue with this. Windows systeminfo command doesn't provide any TZ information
 def convert_windows_to_epoch(date_str):
+    if debug: print(f"Converting |{date_str}| into epoch")
     stripped_date_str = re.search(r'\d+/\d+/\d+, \d+:\d+:\d+ (AM|PM)',date_str)
     # Define the expected date format from systeminfo output
 
@@ -28,10 +29,11 @@ def convert_windows_to_epoch(date_str):
         return epoch_time
     except ValueError as e:
         print(f"Date format error: {e}")
-        return None
+        return datetime.now(timezone.utc)
 
 
 def convert_unix_to_epoch(date_str):
+    if debug: print(f"Converting |{date_str}| into epoch")
     date_format = "%Y-%m-%d %H:%M:%S"
     datetime_obj = datetime.strptime(date_str.strip('\n'), date_format)
     return int(datetime_obj.timestamp())
@@ -54,6 +56,7 @@ def send_command(instance_id, document_name):
 
 # Helper function to define what we consider a retry condition
 def is_empty_or_failed_result(result):
+    if debug: print(f"Empty result from query...")
     return result is None or result == '' or 'failed' in result.lower()
 
 
@@ -109,7 +112,11 @@ def fetch_instance_ids():
     # Retrieve all instances
     for instance in ec2.instances.all():
         # Add each instance's ID to the list
-        instance_ids.append(instance.id)
+        if debug: print(f"Found an instance : {instance.id} {instance.state}")
+        if instance.state['Name'] != "terminated":
+            instance_ids.append(instance.id)
+        else:
+            if debug: print(f"instance terminated: {instance.id}")
 
     return instance_ids
 
@@ -162,29 +169,34 @@ def __get_linux_os_info__(instance_id):
     # launchtime = send_command(instance_id, LINUX_GET_UPTIME_CMD)
     # Parse /etc/os-release
     parsed_os_info = {}
-    lines = (os_info.split("\n"))
-    for line in lines: 
-        if line:
-            keyvalue = line.split("=")
-            if len(keyvalue) == 2: parsed_os_info[keyvalue[0]] = keyvalue[1].strip('\"')
-            else: parsed_os_info[keyvalue[0]] = ""
-    parsed_os_info['launch_time'] = convert_unix_to_epoch(launchtime)     
-    return parsed_os_info
+    if os_info:
+        lines = (os_info.split("\n"))
+        for line in lines: 
+            if line:
+                keyvalue = line.split("=")
+                if len(keyvalue) == 2: parsed_os_info[keyvalue[0]] = keyvalue[1].strip('\"')
+                else: parsed_os_info[keyvalue[0]] = ""
+        parsed_os_info['launch_time'] = convert_unix_to_epoch(launchtime)     
+        return parsed_os_info
+    return {'NAME':instance_id}
 
 
 def __get_windows_os_info__(instance_id):
     os_info = run_document(instance_id, "WindowsGetOsCmd", 20)
     # os_info = send_command(instance_id, WINDOWS_GET_OS_CMD)
     parsed_os_info = {}
-    lines = (os_info.split("\n"))
-    for line in lines: 
-        if line:
-            keyvalue = line.split("=")
-            if len(keyvalue) == 2: parsed_os_info[keyvalue[0]] = keyvalue[1].strip('\"')
-            else: parsed_os_info[keyvalue[0]] = ""
-    win_time = convert_windows_to_epoch(parsed_os_info['launch_time'])
-    parsed_os_info['launch_time'] = win_time
-    return parsed_os_info
+    if os_info:
+        lines = (os_info.split("\n"))
+        for line in lines: 
+            if line:
+                keyvalue = line.split("=")
+                if len(keyvalue) == 2: parsed_os_info[keyvalue[0]] = keyvalue[1].strip('\"')
+                else: parsed_os_info[keyvalue[0]] = ""
+        win_time = convert_windows_to_epoch(parsed_os_info['launch_time'])
+        parsed_os_info['launch_time'] = win_time
+        return parsed_os_info
+    return {'NAME':instance_id}
+
 
 
 def get_pending_ssm_patches(instance_id):
@@ -238,13 +250,6 @@ def get_pending_system_updates(instance_id):
     else:
         return __get_pending_linux_system_updates__(instance_id)
     
-    
-def get_installed_system_updates(instance_id):
-    if instances_state[instance_id]['os_type'] == 'Windows':
-        return __get_installed_windows_system_updates__(instance_id)
-    else:
-        return __get_installed_linux_system_updates__(instance_id)
-
 
 def __get_pending_windows_system_updates__(instance_id):
     updates_raw = run_document(instance_id, "WindowsGetPendingUpdatesCmd", 20)
@@ -260,9 +265,9 @@ def __get_pending_windows_system_updates__(instance_id):
                 keyvalue[1] = keyvalue[1].strip()
                 # print(f"found |{keyvalue[0]}| => |{keyvalue[1]}|")
                 if keyvalue[0] == "Title":
-                    print(colored(f"****************************************** found a pending update : |{keyvalue[1]}| ****************************************** ", 'red'))
+                    if debug: print(colored(f"****************************************** found a pending update : |{keyvalue[1]}| ****************************************** ", 'red'))
                     if keyvalue[1] != current_update['Title']:
-                        print(f"This is a new title : |{keyvalue[1]}| != |{current_update['Title']}|")
+                        if debug: print(f"This is a new title : |{keyvalue[1]}| != |{current_update['Title']}|")
                         if current_update['Title'] != "TBD": parsed_updates.append(current_update)
                         current_update = {'Title': keyvalue[1]}
                     else:
@@ -271,32 +276,8 @@ def __get_pending_windows_system_updates__(instance_id):
                 else:
                     current_update[keyvalue[0]] = keyvalue[1]
     parsed_updates.append(current_update)
-    return parsed_updates
-
-
-def __get_installed_windows_system_updates__(instance_id):
-    updates_raw = run_document(instance_id, "WindowsGetInstalledUpdatesCmd", 20)
-    if not updates_raw: return []
-    lines = (updates_raw.split("\n"))
-    current_update = {'Title': "TBD"}
-    parsed_updates = []
-    for line in lines:
-        if line:
-            keyvalue = line.split(":")
-            if len(keyvalue) == 2:
-                keyvalue[0] = keyvalue[0].strip()
-                keyvalue[1] = keyvalue[1].strip()
-                if keyvalue[0] == "Title":
-                    print(colored(f"****************************************** found an installed update : |{keyvalue[1]}| ****************************************** ", 'red'))
-                    if keyvalue[1] != current_update['Title']:
-                        if current_update['Title'] != "TBD": parsed_updates.append(current_update)
-                        current_update = {'Title': keyvalue[1]}
-                    else:
-                        current_update[keyvalue[0]] = keyvalue[1]
-                else:
-                    current_update[keyvalue[0]] = keyvalue[1]
-    parsed_updates.append(current_update)
-    return parsed_updates
+    if parsed_updates: return parsed_updates
+    else: return []
     
     
 def __get_pending_linux_system_updates__(instance_id):
@@ -315,12 +296,11 @@ def __get_pending_linux_system_updates__(instance_id):
         return []
     updates = run_document(instance_id, command_name,10)
     if debug: print(f"Debug pending updates : |{updates}|")
-    return updates
+    if updates: 
+        parsed_updates = updates.split("\n")        
+        return parsed_updates
+    else: return []
 
-
-def __get_installed_linux_system_updates__(instance_id):
-    return []
-    
     
 def get_instance_ami(instance_id):
     ec2 = boto3.client('ec2')
@@ -376,14 +356,11 @@ def main(instance_ids):
         print(f"Fetching instance ",colored(instance_id, 'green'))
         instances_state[instance_id]['os_info'] = get_os_info(instance_id)
         instances_state[instance_id]['instance_tags'] = get_instance_tags(instance_id)
-        # instances_state[instance_id]['pending_updates'] = get_pending_system_updates(instance_id)
-        # instances_state[instance_id]['installed_updates'] = get_installed_system_updates(instance_id)
+        if not instances_state[instance_id]['instance_tags'].get('tag_patch_group', ""): instances_state[instance_id]['pending_updates'] = get_pending_system_updates(instance_id)
         instances_state[instance_id]['pending_patches'] = get_pending_ssm_patches(instance_id)
         instances_state[instance_id]['reboot_pending_patches'] = get_reboot_pending_ssm_patches(instance_id)
         instances_state[instance_id]['security_pending_patches'] = get_pending_security_ssm_patches(instance_id)
-        # instances_state[instance_id]['installed_patches'] = get_installed_ssm_patches(instance_id)
         instances_state[instance_id]['running_ami'] = get_instance_ami(instance_id)
-        # instances_state[instance_id]['oldest_pending_patch'] = get_older_pending_ssm_patch_age(instance_id)
         instances_state[instance_id]['last_fetch'] = time.asctime()
     print(colored(f"SLA Patch OS 1 : {int(get_sla_patch_os_1())}%", 'yellow'))
     print(colored(f"SLA Patch OS 2 : {int(get_sla_patch_os_2())}%", 'yellow'))
@@ -397,3 +374,7 @@ if __name__ == "__main__":
     else:
         instance_ids = fetch_instance_ids() # Si aucune instance n'est spécifiée, on fetch les instances du compte courant
     main(instance_ids)
+
+
+
+
