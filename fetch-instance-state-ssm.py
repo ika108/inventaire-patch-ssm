@@ -2,7 +2,6 @@ import boto3
 import time
 from datetime import datetime, timezone
 import sys
-import pprint
 import re
 import json
 from termcolor import colored
@@ -50,7 +49,7 @@ def send_command(instance_id, document_name):
         Comment=document_name
     )
     command_id = response['Command']['CommandId']
-    print(f"Commande {document_name} executée, ID est {command_id}.")
+    if debug: print(f"Commande {document_name} executée, ID est {command_id}.")
     return command_id
 
 # Helper function to define what we consider a retry condition
@@ -60,7 +59,7 @@ def is_empty_or_failed_result(result):
 
 def before_retry(retry_state):
     """Function to execute before each retry, logs the attempt number and reason."""
-    print(f"Retrying fetching results... Attempt {retry_state.attempt_number}")
+    if debug: print(f"Retrying fetching results... Attempt {retry_state.attempt_number}")
 
 
 @retry(retry=retry_if_result(is_empty_or_failed_result), stop=stop_after_attempt(5), wait=wait_fixed(10), before_sleep=before_retry)
@@ -83,7 +82,7 @@ def run_document(instance_id, document_name, delay):
     """
     Wrapper function to handle command execution and process the output with separate retry logic for fetching results.
     """
-    print(f"Exécution sur l'instance {instance_id} ({document_name})")
+    if debug: print(f"Exécution sur l'instance {instance_id} ({document_name})")
 
     try:
         command_id = send_command(instance_id, document_name)
@@ -301,7 +300,6 @@ def __get_installed_windows_system_updates__(instance_id):
     
     
 def __get_pending_linux_system_updates__(instance_id):
-    pprint.pp(instance_id)
     if "CentOS Linux 7" in instances_state[instance_id]['os_info']['NAME']:
         command_name = "YumGetPendingPkg"    
     elif "CentOS Linux 8" in instances_state[instance_id]['os_info']['NAME']:
@@ -316,7 +314,7 @@ def __get_pending_linux_system_updates__(instance_id):
         print(f"Can't recognize distribution : {instances_state[instance_id]['os_info']['NAME']}", )
         return []
     updates = run_document(instance_id, command_name,10)
-    print(f"Debug pending updates : |{updates}|")
+    if debug: print(f"Debug pending updates : |{updates}|")
     return updates
 
 
@@ -331,7 +329,7 @@ def get_instance_ami(instance_id):
         # Fetch the instance information
         instance_info = ec2.describe_instances(InstanceIds=[instance_id])
         ami_id = instance_info['Reservations'][0]['Instances'][0]['ImageId']
-        print(f"AMI ID for instance {instance_id}: {ami_id}")
+        if debug: print(f"AMI ID for instance {instance_id}: {ami_id}")
 
         # Fetch AMI details using the AMI ID
         ami_info = ec2.describe_images(ImageIds=[ami_id])
