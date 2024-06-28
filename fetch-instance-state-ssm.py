@@ -192,8 +192,8 @@ def get_pending_ssm_patches(instance_id):
     ssm_client = boto3.client('ssm')
     try:
         response = ssm_client.describe_instance_patches(InstanceId=instance_id, Filters=[
-            {'Key': 'State', 'Values': ['Missing', 'Failed','InstalledRejected']} #,
-            # {'Key': 'Classification', 'Values': ['', 'Updates', 'CriticalUpdates' ]}
+            {'Key': 'State', 'Values': ['Missing', 'Failed','InstalledRejected']},
+            {'Key': 'Classification', 'Values': ['null','Updates', 'CriticalUpdates' ]}
         ])
         return response.get('Patches', [])
     except Exception as e:
@@ -203,12 +203,12 @@ def get_pending_security_ssm_patches(instance_id):
     ssm_client = boto3.client('ssm')
     try:
         response = ssm_client.describe_instance_patches(InstanceId=instance_id, Filters=[
-            {'Key': 'State', 'Values': ['Missing', 'Failed','InstalledRejected']}# ,
-            # {'Key': 'Classification', 'Values': ['SecurityUpdates']}
+            {'Key': 'State', 'Values': ['Missing', 'Failed', 'InstalledRejected']},
+            {'Key': 'Classification', 'Values': ['SecurityUpdates']}
         ])
         return response.get('Patches', [])
     except Exception as e:
-        print(f"Error retrieving pending patches: {e}")
+        print(f"Error retrieving pending security patches: {e}")
 
 def get_reboot_pending_ssm_patches(instance_id):
     ssm_client = boto3.client('ssm')
@@ -275,7 +275,6 @@ def __get_pending_windows_system_updates__(instance_id):
     return parsed_updates
 
 
-
 def __get_installed_windows_system_updates__(instance_id):
     updates_raw = run_document(instance_id, "WindowsGetInstalledUpdatesCmd", 20)
     if not updates_raw: return []
@@ -319,6 +318,7 @@ def __get_pending_linux_system_updates__(instance_id):
     updates = run_document(instance_id, command_name,10)
     print(f"Debug pending updates : |{updates}|")
     return updates
+
 
 def __get_installed_linux_system_updates__(instance_id):
     return []
