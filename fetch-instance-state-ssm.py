@@ -233,23 +233,6 @@ def get_installed_ssm_patches(instance_id):
         print(f"Error retrieving applied patches: {e}")
 
 
-def get_older_pending_ssm_patch_age(instance_id):
-    oldest_patch = None
-    oldest_date = datetime.now()
-    for patch in instances_state[instance_id]['pending_patches'], instances_state[instance_id]['reboot_pending_patches']:
-        if patch: 
-            if len(patch) > 0:
-                release_date = datetime.strptime(patch['ReleaseDate'], '%Y-%m-%dT%H:%M:%SZ')
-                print(f"date patch : {patch} {release_date}")
-                if oldest_patch is None or release_date < oldest_date:
-                    oldest_patch = patch
-                    oldest_date = release_date
-    if oldest_patch:
-        return datetime.now() - release_date
-    else:
-        return None
-
-
 def get_pending_system_updates(instance_id):
     if instances_state[instance_id]['os_type'] == 'Windows':
         return __get_pending_windows_system_updates__(instance_id)
@@ -305,15 +288,12 @@ def __get_installed_windows_system_updates__(instance_id):
             if len(keyvalue) == 2:
                 keyvalue[0] = keyvalue[0].strip()
                 keyvalue[1] = keyvalue[1].strip()
-                # print(f"found |{keyvalue[0]}| => |{keyvalue[1]}|")
                 if keyvalue[0] == "Title":
                     print(colored(f"****************************************** found an installed update : |{keyvalue[1]}| ****************************************** ", 'red'))
                     if keyvalue[1] != current_update['Title']:
-                        # print(f"This is a new title : |{keyvalue[1]}| != |{current_update['Title']}|")
                         if current_update['Title'] != "TBD": parsed_updates.append(current_update)
                         current_update = {'Title': keyvalue[1]}
                     else:
-                        # print(f"Still pushing for title |{current_update['Title']}| : |{keyvalue[0]}| => |{keyvalue[1]}|")
                         current_update[keyvalue[0]] = keyvalue[1]
                 else:
                     current_update[keyvalue[0]] = keyvalue[1]
@@ -336,7 +316,6 @@ def __get_pending_linux_system_updates__(instance_id):
     else:
         print(f"Can't recognize distribution : {instances_state[instance_id]['os_info']['NAME']}", )
         return []
-    # updates = send_command(instance_id, command)
     updates = run_document(instance_id, command_name,10)
     print(f"Debug pending updates : |{updates}|")
     return updates
@@ -411,7 +390,7 @@ def main(instance_ids):
     print(colored(f"SLA Patch OS 1 : {int(get_sla_patch_os_1())}%", 'yellow'))
     print(colored(f"SLA Patch OS 2 : {int(get_sla_patch_os_2())}%", 'yellow'))
     parsed_data = json.dumps(instances_state, sort_keys=True, default=str)
-    print(parsed_data)
+    if debug: print(parsed_data)
 
 if __name__ == "__main__":
     # Exemple d'utilisation: python3 script.py [i-1234567890abcdef0] [i-abcdef1234567890]
