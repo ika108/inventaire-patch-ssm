@@ -1,6 +1,6 @@
 import boto3
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 import sys
 import pprint
 import re
@@ -63,7 +63,7 @@ def before_retry(retry_state):
     print(f"Retrying fetching results... Attempt {retry_state.attempt_number}")
 
 
-@retry(retry=retry_if_result(is_empty_or_failed_result), stop=stop_after_attempt(3), wait=wait_fixed(10), before_sleep=before_retry)
+@retry(retry=retry_if_result(is_empty_or_failed_result), stop=stop_after_attempt(5), wait=wait_fixed(10), before_sleep=before_retry)
 def fetch_command_result(command_id, instance_id):
     """
     Fetches the result of a command execution with retries for empty or failed results.
@@ -76,10 +76,10 @@ def fetch_command_result(command_id, instance_id):
     if output['Status'] == 'Success' and output['StandardOutputContent']:
         return output['StandardOutputContent']
     else:
-        return ''  # Returning an empty string if not successful or if the output is empty
+        return ""  # Returning an empty string if not successful or if the output is empty
 
 
-def run_document(instance_id, document_name, delay=10):
+def run_document(instance_id, document_name, delay):
     """
     Wrapper function to handle command execution and process the output with separate retry logic for fetching results.
     """
@@ -95,7 +95,7 @@ def run_document(instance_id, document_name, delay=10):
             return result
         else:
             print(f"Erreur ou absence de sortie de l'exécution de la commande {document_name} sur l'instance {instance_id}")
-            return None
+            return ""
     except Exception as e:
         print(f"Une erreur inattendue est survenue lors de la tentative d'exécution de la commande: {str(e)}")
 
@@ -157,8 +157,8 @@ def get_os_info(instance_id):
 
 
 def __get_linux_os_info__(instance_id):  
-    os_info = run_document(instance_id, "LinuxGetOsCmd")
-    launchtime = run_document(instance_id, "LinuxGetUptimeCmd")
+    os_info = run_document(instance_id, "LinuxGetOsCmd",10)
+    launchtime = run_document(instance_id, "LinuxGetUptimeCmd",10)
     # os_info = send_command(instance_id, LINUX_GET_OS_CMD)
     # launchtime = send_command(instance_id, LINUX_GET_UPTIME_CMD)
     # Parse /etc/os-release
@@ -192,12 +192,23 @@ def get_pending_ssm_patches(instance_id):
     ssm_client = boto3.client('ssm')
     try:
         response = ssm_client.describe_instance_patches(InstanceId=instance_id, Filters=[
-            {'Key': 'State', 'Values': ['Missing', 'Failed','InstalledRejected']}
+            {'Key': 'State', 'Values': ['Missing', 'Failed','InstalledRejected']} #,
+            # {'Key': 'Classification', 'Values': ['', 'Updates', 'CriticalUpdates' ]}
         ])
         return response.get('Patches', [])
     except Exception as e:
         print(f"Error retrieving pending patches: {e}")
 
+def get_pending_security_ssm_patches(instance_id):
+    ssm_client = boto3.client('ssm')
+    try:
+        response = ssm_client.describe_instance_patches(InstanceId=instance_id, Filters=[
+            {'Key': 'State', 'Values': ['Missing', 'Failed','InstalledRejected']}# ,
+            # {'Key': 'Classification', 'Values': ['SecurityUpdates']}
+        ])
+        return response.get('Patches', [])
+    except Exception as e:
+        print(f"Error retrieving pending patches: {e}")
 
 def get_reboot_pending_ssm_patches(instance_id):
     ssm_client = boto3.client('ssm')
@@ -226,16 +237,17 @@ def get_older_pending_ssm_patch_age(instance_id):
     oldest_patch = None
     oldest_date = datetime.now()
     for patch in instances_state[instance_id]['pending_patches'], instances_state[instance_id]['reboot_pending_patches']:
-        if len(patch) > 0:
-            pprint.pp(patch)
-            release_date = datetime.strptime(patch['ReleaseDate'], '%Y-%m-%dT%H:%M:%SZ')
-            if oldest_patch is None or release_date < oldest_date:
-                oldest_patch = patch
-                oldest_date = release_date
-        if oldest_patch:
-            return datetime.now() - release_date
-        else:
-            return None
+        if patch: 
+            if len(patch) > 0:
+                release_date = datetime.strptime(patch['ReleaseDate'], '%Y-%m-%dT%H:%M:%SZ')
+                print(f"date patch : {patch} {release_date}")
+                if oldest_patch is None or release_date < oldest_date:
+                    oldest_patch = patch
+                    oldest_date = release_date
+    if oldest_patch:
+        return datetime.now() - release_date
+    else:
+        return None
 
 
 def get_pending_system_updates(instance_id):
@@ -253,7 +265,8 @@ def get_installed_system_updates(instance_id):
 
 
 def __get_pending_windows_system_updates__(instance_id):
-    updates_raw = run_document(instance_id, "WindowsGetPendingUpdatesCmd", 5)
+    updates_raw = run_document(instance_id, "WindowsGetPendingUpdatesCmd", 20)
+    if not updates_raw: return []
     lines = (updates_raw.split("\n"))
     current_update = {'Title': "TBD"}
     parsed_updates = []
@@ -263,7 +276,7 @@ def __get_pending_windows_system_updates__(instance_id):
             if len(keyvalue) == 2:
                 keyvalue[0] = keyvalue[0].strip()
                 keyvalue[1] = keyvalue[1].strip()
-                print(f"found |{keyvalue[0]}| => |{keyvalue[1]}|")
+                # print(f"found |{keyvalue[0]}| => |{keyvalue[1]}|")
                 if keyvalue[0] == "Title":
                     print(colored(f"****************************************** found a pending update : |{keyvalue[1]}| ****************************************** ", 'red'))
                     if keyvalue[1] != current_update['Title']:
@@ -271,7 +284,7 @@ def __get_pending_windows_system_updates__(instance_id):
                         if current_update['Title'] != "TBD": parsed_updates.append(current_update)
                         current_update = {'Title': keyvalue[1]}
                     else:
-                        print(f"Still pushing for title |{current_update['Title']}| : |{keyvalue[0]}| => |{keyvalue[1]}|")
+                        #print(f"Still pushing for title |{current_update['Title']}| : |{keyvalue[0]}| => |{keyvalue[1]}|")
                         current_update[keyvalue[0]] = keyvalue[1]
                 else:
                     current_update[keyvalue[0]] = keyvalue[1]
@@ -281,7 +294,8 @@ def __get_pending_windows_system_updates__(instance_id):
 
 
 def __get_installed_windows_system_updates__(instance_id):
-    updates_raw = run_document(instance_id, "WindowsGetInstalledUpdatesCmd", 5)
+    updates_raw = run_document(instance_id, "WindowsGetInstalledUpdatesCmd", 20)
+    if not updates_raw: return []
     lines = (updates_raw.split("\n"))
     current_update = {'Title': "TBD"}
     parsed_updates = []
@@ -310,18 +324,20 @@ def __get_installed_windows_system_updates__(instance_id):
 def __get_pending_linux_system_updates__(instance_id):
     pprint.pp(instance_id)
     if "CentOS Linux 7" in instances_state[instance_id]['os_info']['NAME']:
-        command_name = "YumGetPendingPkgCmd"    
+        command_name = "YumGetPendingPkg"    
     elif "CentOS Linux 8" in instances_state[instance_id]['os_info']['NAME']:
-        command_name = "DnfGetPendingPkgCmd"
+        command_name = "DnfGetPendingPkg"
+    elif "Amazon Linux" in instances_state[instance_id]['os_info']['NAME']:
+        command_name = "DnfGetPendingPkg"        
     elif "Ubuntu" in instances_state[instance_id]['os_info']['NAME']:
-        command_name = "AptGetPendingPkgCmd"
+        command_name = "AptGetPendingPkg"
     elif "Debian" in instances_state[instance_id]['os_info']['NAME']:
-        command_name = "AptGetPendingPkgCmd"
+        command_name = "AptGetPendingPkg"
     else:
         print(f"Can't recognize distribution : {instances_state[instance_id]['os_info']['NAME']}", )
         return []
     # updates = send_command(instance_id, command)
-    updates = run_document(instance_id, command_name)
+    updates = run_document(instance_id, command_name,10)
     print(f"Debug pending updates : |{updates}|")
     return updates
 
@@ -351,27 +367,51 @@ def get_instance_ami(instance_id):
         print(f"An error occurred: {e}")
         return None
 
+## Patch Managment Acceptancy critera : KPI (%) = 100 - ((nb_instance_with_old_pending_patches / nb_instances) * 100 )
+## old_pending_patches = pending more than 30 Days
+
+def get_sla_patch_os_1():
+    nb_instance_with_old_pending_patch = 0
+    now = datetime.now(timezone.utc)
+    for instance in instances_state:
+        for pending_patche in instances_state[instance]['pending_patches']:
+            patch_age = (now - pending_patche['ReleaseDate']).days
+            if patch_age >= 30:
+                nb_instance_with_old_pending_patch += 1
+        for pending_patche in instances_state[instance]['reboot_pending_patches']:
+            patch_age = (now - pending_patche['ReleaseDate']).days
+            if patch_age >= 30:
+                nb_instance_with_old_pending_patch += 1
+    return 100 - ( (nb_instance_with_old_pending_patch / len(instances_state) ) * 100)
+    
+def get_sla_patch_os_2():
+    nb_instance_with_old_security_pending_patch = 0
+    now = datetime.now(timezone.utc)
+    for instance in instances_state:
+        for pending_patche in instances_state[instance]['security_pending_patches']:
+            patch_age = (now - pending_patche['ReleaseDate']).days
+            if patch_age >= 30:
+                nb_instance_with_old_security_pending_patch += 1
+    return 100 - ( (nb_instance_with_old_security_pending_patch / len(instances_state) ) * 100)
 
 def main(instance_ids):
     for instance_id in instance_ids:
         print(f"Fetching instance ",colored(instance_id, 'green'))
         instances_state[instance_id]['os_info'] = get_os_info(instance_id)
         instances_state[instance_id]['instance_tags'] = get_instance_tags(instance_id)
-        instances_state[instance_id]['pending_updates'] = get_pending_system_updates(instance_id)
-        instances_state[instance_id]['installed_updates'] = get_installed_system_updates(instance_id)
+        # instances_state[instance_id]['pending_updates'] = get_pending_system_updates(instance_id)
+        # instances_state[instance_id]['installed_updates'] = get_installed_system_updates(instance_id)
         instances_state[instance_id]['pending_patches'] = get_pending_ssm_patches(instance_id)
         instances_state[instance_id]['reboot_pending_patches'] = get_reboot_pending_ssm_patches(instance_id)
-        instances_state[instance_id]['installed_patches'] = get_installed_ssm_patches(instance_id)
+        instances_state[instance_id]['security_pending_patches'] = get_pending_security_ssm_patches(instance_id)
+        # instances_state[instance_id]['installed_patches'] = get_installed_ssm_patches(instance_id)
         instances_state[instance_id]['running_ami'] = get_instance_ami(instance_id)
-        instances_state[instance_id]['oldest_pending_patch'] = get_older_pending_ssm_patch_age(instance_id)
+        # instances_state[instance_id]['oldest_pending_patch'] = get_older_pending_ssm_patch_age(instance_id)
         instances_state[instance_id]['last_fetch'] = time.asctime()
-    if debug: 
-        print("Debug : ")
-        pprint.pp(instances_state)
-    else:
-        parsed_data = json.dumps(instances_state, sort_keys=True, default=str)
-        print(parsed_data)
-
+    print(colored(f"SLA Patch OS 1 : {int(get_sla_patch_os_1())}%", 'yellow'))
+    print(colored(f"SLA Patch OS 2 : {int(get_sla_patch_os_2())}%", 'yellow'))
+    parsed_data = json.dumps(instances_state, sort_keys=True, default=str)
+    print(parsed_data)
 
 if __name__ == "__main__":
     # Exemple d'utilisation: python3 script.py [i-1234567890abcdef0] [i-abcdef1234567890]

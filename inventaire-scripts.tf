@@ -16,9 +16,9 @@ locals {
          "$UpdateSearcher = $UpdateSession.CreateupdateSearcher()",
          "@($UpdateSearcher.Search(\"IsHidden=0 and IsInstalled=1\").Updates)| Out-String -Width 4096"]
   linux_get_uptime_cmd = "uptime -s 2>/dev/null"
-  yum_get_pending_pkg_cmd = "yum --cacheonly check-update -q | grep -v \"^(Loaded plugins|security|Obsoleting|Last metadata expiration check)\" | wc -l"
-  dnf_get_pending_pkg_cmd = "dnf --cacheonly check-update -q | grep -v \"^(Last metadata expiration check|Dependencies resolved)\" | wc -l"
-  apt_get_pending_pkg_cmd = "apt list --upgradable | grep -v -e \"^Listing...\" | wc -l"
+  yum_get_pending_pkg_cmd = "yum --cacheonly check-update -q | grep -v \"^(Loaded plugins|security|Obsoleting|Last metadata expiration check)\""
+  dnf_get_pending_pkg_cmd = "dnf --cacheonly check-update -q | grep -v \"^(Last metadata expiration check|Dependencies resolved)\""
+  apt_get_pending_pkg_cmd = "apt list --upgradable | grep -v -e \"^Listing...\" | cut -d \" \" -f 1"
 }
 
 resource "aws_ssm_document" "linux_get_os" {
